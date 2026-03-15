@@ -8,7 +8,8 @@
 # Use a pinned version
 FROM postgres:15.3
 
-# All SQL files in the build context
-# get copied into the container and
-# run on init.
-COPY *.sql /docker-entrypoint-initdb.d/
+# Copy SQL and shell init files into the Postgres init directory.
+COPY *.sql *.sh /docker-entrypoint-initdb.d/
+
+# Ensure shell init files are executable.
+RUN chmod +x /docker-entrypoint-initdb.d/*.sh

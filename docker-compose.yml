@@ -13,7 +13,8 @@ services:
         environment:
             # Custom PGDATA per recommendations from official Docker page
             - PGDATA=/var/lib/postgresql/data/pgdata
-            - POSTGRES_PASSWORD=pleaseChange # default postgres password that should be changed for security.
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            - OED_DB_PASSWORD=${OED_DB_PASSWORD}
         volumes:
             - ./postgres-data:/var/lib/postgresql/data/pgdata
         healthcheck:
@@ -34,7 +35,7 @@ services:
             - OED_DB_USER=oed
             - OED_DB_DATABASE=oed
             - OED_DB_TEST_DATABASE=oed_testing
-            - OED_DB_PASSWORD=opened
+            - OED_DB_PASSWORD=${OED_DB_PASSWORD}
             - OED_DB_HOST=database # Docker will set this hostname
             - OED_DB_PORT=5432
             - OED_TOKEN_SECRET=?
@@ -75,8 +76,8 @@ services:
         depends_on:
             # - database
             database:
-              # We need the database and it has to be ready for work (see healthcheck above).
-              condition: service_healthy
+                # We need the database and it has to be ready for work (see healthcheck above).
+                condition: service_healthy
         healthcheck:
             test: ["CMD", "curl", "-f", "http://localhost:3000"]
             interval: 10s
@@ -85,33 +86,32 @@ services:
         # Lets docker compose up work right
         # If environment variable install_args is not set then it becomes blank without warning user.
         command:
-            [
-                "bash",
-                "./src/scripts/installOED.sh",
-                "${install_args:-}"
-            ]
+          [
+              "bash",
+              "./src/scripts/installOED.sh",
+              "${install_args:-}"
+          ]
         # Use this if you are using a docker-compose that is earlier than version 2 and comment out the one above.
         # command: ["bash", "./src/scripts/installOED.sh"]
 
     # Cypress testing service
     cypress:
-      image: cypress/included
-      profiles:
-        - ui-testing
-      environment:
-        - CYPRESS_BASE_URL=http://web:3000
-        - DISPLAY=:99
-      working_dir: /usr/src/app
-      depends_on:
-        web:
-          condition: service_healthy
-      volumes:
-        - ./:/usr/src/app
-      entrypoint: >
-        /bin/sh -c "
-        rm -f /tmp/.X99-lock &&
-        Xvfb :99 -screen 0 1024x768x16"
-      read_only: true
-      security_opt:
-        - no-new-privileges:true
-
+        image: cypress/included
+        profiles:
+            - ui-testing
+        environment:
+            - CYPRESS_BASE_URL=http://web:3000
+            - DISPLAY=:99
+        working_dir: /usr/src/app
+        depends_on:
+            web:
+                condition: service_healthy
+        volumes:
+            - ./:/usr/src/app
+        entrypoint: >
+            /bin/sh -c "
+            rm -f /tmp/.X99-lock &&
+            Xvfb :99 -screen 0 1024x768x16"
+        read_only: true
+        security_opt:
+            - no-new-privileges:true
