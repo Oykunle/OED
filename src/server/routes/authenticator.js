@@ -11,20 +11,25 @@ const validate = require('jsonschema').validate;
 const { isTokenAuthorized, isUserAuthorized } = require('../util/userRoles');
 const { getConnection } = require('../db');
 const escapeHtml = require('escape-html');
-const { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, TOKEN_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH }
-	= require('../util/validationConstants');
+const {
+	PASSWORD_MAX_LENGTH,
+	PASSWORD_MIN_LENGTH,
+	TOKEN_MAX_LENGTH,
+	USERNAME_MIN_LENGTH,
+	USERNAME_MAX_LENGTH
+} = require('../util/validationConstants');
 
 /**
  * Middleware function to force a route to require authentication
- * Verifies the request's token against the server's secret token
- * It is used within this file but not by other parts of OED.
  */
 authMiddleware = (req, res, next) => {
 	const token = req.headers.token || req.body.token || req.query.token;
+
 	const validParams = {
 		type: 'string',
 		maxLength: TOKEN_MAX_LENGTH
 	};
+
 	if (!validate(token, validParams).valid) {
 		res.status(403).json({ success: false, message: 'No token provided or JSON was invalid.' });
 	} else if (token) {
@@ -34,12 +39,30 @@ authMiddleware = (req, res, next) => {
 			} else {
 				try {
 					const conn = getConnection();
-					// checks if user exists in the database in case it was deleted
-					await User.getByID(decoded.data, conn);
+
+					// Ensure user exists
+					const user = await User.getByID(decoded.data, conn);
+
+					// 🔐 TOKEN INVALIDATION LOGIC
+					const tokenIssuedAt = decoded.iat;
+					const invalidBefore = user.tokenInvalidBefore
+						? Math.floor(new Date(user.tokenInvalidBefore).getTime() / 1000)
+						: 0;
+
+					if (tokenIssuedAt < invalidBefore) {
+						return res.status(401).json({
+							success: false,
+							message: 'Token invalidated.'
+						});
+					}
+
 					req.decoded = decoded;
 					next();
 				} catch (error) {
-					res.status(401).json({ success: false, message: 'User does not exist in database.' });
+					res.status(401).json({
+						success: false,
+						message: 'User does not exist in database.'
+					});
 				}
 			}
 		});
@@ -49,15 +72,11 @@ authMiddleware = (req, res, next) => {
 };
 
 /**
- * Middleware that checks the request body for the username and password parameters. If the body contains the username and password parameters, then next 
- * is executed. Otherwise, the server responds with a 400 error.
+ * Middleware that validates username/password request body
  */
 function credentialsRequestValidationMiddleware(req, res, next) {
 	const validParams = {
 		type: 'object',
-		// Don't use ``additionalProperties: false,`` since there are more parameters for some modes and this
-		// is used across all those routes.
-		// The route replaces historical email with username so don't need a oneOf to test for one as required.
 		required: ['username', 'password'],
 		properties: {
 			username: {
@@ -72,6 +91,7 @@ function credentialsRequestValidationMiddleware(req, res, next) {
 			}
 		}
 	};
+
 	if (!validate(req.body, validParams).valid) {
 		res.status(400).send('Invalid JSON. \n');
 	} else {
@@ -80,132 +100,124 @@ function credentialsRequestValidationMiddleware(req, res, next) {
 }
 
 /**
- * Verifies the username and password of a user.
- * @param {string} username 
- * @param {string} password 
- * @param {boolean} returnUser 
- * @returns true if the user exists in the database. False otherwise. Returns the user itself if returnUser is set to true and user is verified.
+ * Verify credentials
  */
 async function verifyCredentials(username, password, returnUser = false) {
 	const conn = getConnection();
 	const user = await User.getByUsername(username, conn);
+
 	let isValid;
 	if (user === null) {
-		// User did not exist so return false.
 		isValid = false;
 	} else {
 		isValid = await bcrypt.compare(password, user.passwordHash);
 	}
-	if (returnUser) {
-		return isValid && user;
-	} else {
-		return isValid;
-	}
+
+	return returnUser ? isValid && user : isValid;
 }
 
 /**
- * Returns middleware that verifies the requested token and only proceeds if the requestor is a particular user role or is Admin.
- * @param {string} role 
- * @param action 
+ * Role-based token middleware
  */
 function roleTokenAuthMiddleware(role, action) {
 	return function (req, res, next) {
-		this.authMiddleware(req, res, async () => {
+		authMiddleware(req, res, async () => {
 			const token = req.headers.token || req.body.token || req.query.token;
+
 			if (await isTokenAuthorized(token, role)) {
 				next();
 			} else {
-				log.warn(`Got request to '${action}' with invalid credentials. ${role.toUpperCase()} role is required to '${action}'.`);
-				res.status(403)
-					.json({ message: `Invalid credentials supplied. Only ${role.toUpperCase()} can ${action}.` });
+				log.warn(`Got request to '${action}' with invalid credentials.`);
+				res.status(403).json({
+					message: `Invalid credentials. Only ${role.toUpperCase()} can ${action}.`
+				});
 			}
-		})
-	}
+		});
+	};
 }
 
-/**
- * Returns middleware that verifies the requested token and only proceeds if the requestor is an ADMIN role.
- */
 function adminAuthMiddleware(action) {
 	return roleTokenAuthMiddleware(User.role.ADMIN, action);
 }
 
-/**
- * Returns middleware that verifies the requested token and only proceeds if the requestor has the EXPORT role.
- */
 function exportAuthMiddleware(action) {
 	return roleTokenAuthMiddleware(User.role.EXPORT, action);
 }
 
-/**
- * Returns middleware that verifies the requested token and only proceeds if the requestor has the CSV role.
- */
 function csvAuthMiddleware(action) {
 	return roleTokenAuthMiddleware(User.role.CSV, action);
 }
 
 /**
- * Returns middleware that only authenticates an Admin or Obvius user via username and password credentials.
- * @param {string} action - is a phrase or word that can be prefixed by 'to' for the proper response and warning messages.
+ * Username/password auth for Obvius
  */
 function obviusUsernameAndPasswordAuthMiddleware(action) {
-	// TODO This should probably be merged with roleTokenAuthMiddleware.
 	return function (req, res, next) {
 		credentialsRequestValidationMiddleware(req, res, async () => {
 			try {
 				const user = await verifyCredentials(req.body.username, req.body.password, true);
+
 				if (user) {
 					if (isUserAuthorized(user, User.role.OBVIUS)) {
 						next();
 					} else {
-						const message = `Got request to '${action}' with invalid authorization level. Obvius role is at least required to '${action}'.`;
+						const message = `Invalid authorization level.`;
 						log.warn(message);
 						res.status(401).send(message);
-						return;
 					}
 				} else {
-					const message = `Got request to '${action} with invalid credentials.`;
+					const message = `Invalid credentials.`;
 					log.warn(message);
 					res.status(400).send(message);
-					return;
 				}
 			} catch (error) {
 				if (error.message === 'No data returned from the query.') {
-					res.status(400).send(`No user corresponding to the username: ${escapeHtml(req.body.username)} was found. Please make a request with a valid username.`);
+					res.status(400).send(
+						`No user found for: ${escapeHtml(req.body.username)}`
+					);
 				} else {
-					log.error('Internal Server Error for Obvius request.', error);
-					res.status(500).send('Internal OED Server Error for Obvius request.');
+					log.error('Internal Server Error', error);
+					res.status(500).send('Internal OED Server Error.');
 				}
 			}
 		});
-	}
+	};
 }
 
 /**
- * Middleware function to force a route to provide optional authentication
- * Verifies the request's token against the server's secret token
- * Sets the req field hasValidAuthToken to true or false
+ * Optional auth middleware
  */
 optionalAuthMiddleware = (req, res, next) => {
-	// Set auth token to false initially.
 	req.hasValidAuthToken = false;
 
 	const token = req.headers.token || req.body.token || req.query.token;
+
 	const validParams = {
 		type: 'string',
 		maxLength: TOKEN_MAX_LENGTH
 	};
 
-	// If there is no token, there can be no valid token.
 	if (!validate(token, validParams).valid) {
 		next();
 	} else if (token) {
-		jwt.verify(token, secretToken, (err, decoded) => {
-			if (err) {
-				// do nothing. Could log here if need be
-			} else {
-				req.decoded = decoded;
-				req.hasValidAuthToken = true;
+		jwt.verify(token, secretToken, async (err, decoded) => {
+			if (!err) {
+				try {
+					const conn = getConnection();
+					const user = await User.getByID(decoded.data, conn);
+
+					const tokenIssuedAt = decoded.iat;
+					const invalidBefore = user.tokenInvalidBefore
+						? Math.floor(new Date(user.tokenInvalidBefore).getTime() / 1000)
+						: 0;
+
+					if (tokenIssuedAt >= invalidBefore) {
+						req.decoded = decoded;
+						req.hasValidAuthToken = true;
+					}
+				} catch (error) {
+					// ignore
+				}
 			}
 			next();
 		});
@@ -215,6 +227,7 @@ optionalAuthMiddleware = (req, res, next) => {
 };
 
 module.exports = {
+	authMiddleware,
 	adminAuthMiddleware,
 	csvAuthMiddleware,
 	exportAuthMiddleware,

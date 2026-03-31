@@ -59,3 +59,4 @@ src/server/tmp/*
 
 #ui-testing screenshots
 src/cypress/screenshots/*
+.DS_Store
